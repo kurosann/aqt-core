@@ -1,11 +1,11 @@
 package dec
 
 import (
+	"fmt"
+	"math/big"
 	"reflect"
 
 	"github.com/shopspring/decimal"
-
-	"github.com/kurosann/aqt-core/logger"
 )
 
 func Int[T I](i T) decimal.Decimal {
@@ -73,18 +73,82 @@ func Mul[T Num, R Num](i1 T, i2 R) decimal.Decimal {
 func Div[T Num, R Num](i1 T, i2 R) decimal.Decimal {
 	return N(i1).Div(N(i2))
 }
+func Max[T Num, R Num](i1 T, i2 R) decimal.Decimal {
+	return decimal.Max(N(i1), N(i2))
+}
+func Min[T Num, R Num](i1 T, i2 R) decimal.Decimal {
+	return decimal.Min(N(i1), N(i2))
+}
+func Mean(in []decimal.Decimal) decimal.Decimal {
+	if len(in) == 0 {
+		return Zero
+	}
+	return Div(Sum(in), len(in))
+}
 
-const LoopCount = 50
+func Variance(in []decimal.Decimal, mean decimal.Decimal) decimal.Decimal {
+	if len(in) == 0 {
+		return Zero
+	}
+	total := decimal.Zero
+	for _, v := range in {
+		total = total.Add(v.Sub(mean).Pow(decimal.NewFromInt(2)))
+	}
+	return Div(total, decimal.NewFromInt(int64(len(in))))
+}
 
 func Sqrt(i1 decimal.Decimal) decimal.Decimal {
-	x := Div(i1, 3)
-	lastX := Int(0)
-	for i := 0; i < LoopCount; i++ {
-		x = i1.Div(Mul(x, 2)).Add(Div(x, 2))
-		if Eq(x, lastX) {
+	if i1.LessThan(Zero) {
+		return Zero
+	}
+	if i1.Equal(Zero) {
+		return Zero
+	}
+
+	// 处理科学计数法形式
+	coefficient := i1.Coefficient()
+	exponent := i1.Exponent()
+
+	// 调整奇偶指数
+	if exponent%2 != 0 {
+		coefficient = coefficient.Mul(coefficient, big.NewInt(10))
+		exponent--
+	}
+
+	// 构建初始猜测值：sqrt(coefficient) * 10^(exponent/2)
+	sqrtCoeff := sqrtBigInt(coefficient) // 自定义大整数平方根算法
+	x := decimal.NewFromBigInt(sqrtCoeff, exponent/2)
+
+	// 牛顿迭代法优化
+	precision := int32(16) // 提高迭代精度
+	maxIterations := 30    // 增加最大迭代次数
+
+	for i := 0; i < maxIterations; i++ {
+		lastX := x
+		// 迭代公式: x = (x + n/x)/2
+		x = x.Add(i1.Div(x)).Div(N(2)).Round(precision)
+		// 收敛判断（使用更严格的终止条件）
+		if diff := x.Sub(lastX).Abs(); diff.LessThan(N(1e-20)) {
 			break
 		}
-		lastX = x
+	}
+	return x.Round(8) // 最终保留8位小数
+}
+
+// 自定义大整数平方根算法
+func sqrtBigInt(n *big.Int) *big.Int {
+	if n.Sign() < 0 {
+		return big.NewInt(0)
+	}
+
+	x := new(big.Int)
+	x.Set(n)
+	y := new(big.Int)
+	y.Add(x, big.NewInt(1)).Div(y, big.NewInt(2))
+
+	for x.Cmp(y) > 0 {
+		x.Set(y)
+		y.Add(x, new(big.Int).Div(n, x)).Div(y, big.NewInt(2))
 	}
 	return x
 }
@@ -158,8 +222,7 @@ func N(e any) decimal.Decimal {
 		if s, ok := e.(interface{ String() string }); ok {
 			return String(s.String())
 		}
-		logger.Panicf("decimal type is not support: %v", t)
-		return Int(0)
+		panic(fmt.Sprintf("decimal type is not support: %v", t))
 	}
 }
 
