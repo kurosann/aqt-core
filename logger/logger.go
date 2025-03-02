@@ -156,13 +156,13 @@ func Sync() {
 }
 
 type LogConfig struct {
-	Name      string
-	LogPath   string
-	Level     zapcore.Level
-	MaxSize   int
-	MaxBackup int
-	MaxAge    int
-	IsRelease bool
+	Name        string
+	LogPath     string
+	Level       zapcore.Level
+	MaxSize     int
+	MaxBackup   int
+	MaxAge      int
+	HideConsole bool
 }
 
 func InitLogger(logConfig LogConfig) {
@@ -194,28 +194,35 @@ type Logger struct {
 }
 
 func newLogger(logConfig LogConfig) *Logger {
-	_ = os.Mkdir(logConfig.LogPath, 0660)
 	config := zap.NewProductionEncoderConfig()
 	config.EncodeTime = zapcore.TimeEncoderOfLayout("2006/01/02-15:04:05.000")
 	config.EncodeLevel = zapcore.CapitalColorLevelEncoder
 	encoder := zapcore.NewConsoleEncoder(config)
 	var cores []zapcore.Core
-	if !logConfig.IsRelease {
-		cores = append(cores, zapcore.NewCore(encoder, os.Stdout, zap.DebugLevel))
+	if !logConfig.HideConsole {
+		cores = append(cores, zapcore.NewCore(encoder, os.Stdout, logConfig.Level))
 	} else {
-		file, err := os.OpenFile(filepath.Join(logConfig.LogPath, logConfig.Name+"_stdout_panic.log"), os.O_CREATE|os.O_RDWR|os.O_APPEND, 0600)
+		errFile, err := os.OpenFile(filepath.Join(logConfig.LogPath, logConfig.Name+"_stderr.log"), os.O_CREATE|os.O_RDWR|os.O_APPEND, 0600)
 		if err != nil {
 			panic(err)
 		}
-		_, _ = file.WriteString(fmt.Sprintf("==========================> pid: %d <========================== %s\n", os.Getpid(), time.Now().Format(time.DateTime)))
-		redirectStderr(file)
+		_, _ = errFile.WriteString(fmt.Sprintf("==========================> pid: %d <========================== %s\n", os.Getpid(), time.Now().Format(time.DateTime)))
+		outFile, err := os.OpenFile(filepath.Join(logConfig.LogPath, logConfig.Name+"_stdout.log"), os.O_CREATE|os.O_RDWR|os.O_APPEND, 0600)
+		if err != nil {
+			panic(err)
+		}
+		_, _ = outFile.WriteString(fmt.Sprintf("==========================> pid: %d <========================== %s\n", os.Getpid(), time.Now().Format(time.DateTime)))
+		redirectStderr(outFile, errFile)
 	}
-	cores = append(cores,
-		debugFileCore(encoder, logConfig.LogPath, logConfig.Name),
-		infoFileCore(encoder, logConfig.LogPath, logConfig.Name),
-		errorFileCore(encoder, logConfig.LogPath, logConfig.Name),
-		warnFileCore(encoder, logConfig.LogPath, logConfig.Name),
-	)
+	if logConfig.LogPath != "" {
+		_ = os.Mkdir(logConfig.LogPath, 0644)
+		cores = append(cores,
+			debugFileCore(encoder, logConfig.LogPath, logConfig.Name),
+			infoFileCore(encoder, logConfig.LogPath, logConfig.Name),
+			errorFileCore(encoder, logConfig.LogPath, logConfig.Name),
+			warnFileCore(encoder, logConfig.LogPath, logConfig.Name),
+		)
+	}
 	core := zapcore.NewTee(cores...)
 	return &Logger{
 		l: zap.New(core, zap.AddCaller(), zap.AddCallerSkip(1), zap.IncreaseLevel(logConfig.Level)),
