@@ -2,6 +2,9 @@ package ws
 
 import (
 	"context"
+	"crypto/tls"
+	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -12,16 +15,39 @@ import (
 )
 
 type Dialer struct {
-	Header http.Header
+	Conn    net.Conn
+	Tls     *tls.Config
+	Header  http.Header
+	MsgType MsgType
+
+	Marshal func(any) ([]byte, error)
 }
 
-func (d *Dialer) Dial(ctx context.Context, url string) (*Conn, error) {
-	return newConn(url, d.Header)
+func (d *Dialer) Dial(ctx context.Context, address string) (*Conn, error) {
+	if d.Header == nil {
+		d.Header = http.Header{}
+	}
+	if d.Tls == nil {
+		d.Tls = &tls.Config{}
+	}
+	if d.Marshal == nil {
+		d.Marshal = json.Marshal
+	}
+	return d.newConn(address, d.Header, d.Tls)
 }
+
+type MsgType string
+
+const (
+	MsgTypeText   MsgType = "Text"
+	MsgTypeBinary MsgType = "Binary"
+)
 
 type Conn struct {
-	conn *websocket.Conn
+	MsgType MsgType // text or binary (default: text)
+	Marshal func(any) ([]byte, error)
 
+	conn   *websocket.Conn
 	status string
 }
 
@@ -35,34 +61,93 @@ func (d *proxyDialer) Dial(network, addr string) (net.Conn, error) {
 	return d.conn, nil
 }
 
-func newConn(address string, header http.Header) (*Conn, error) {
+func (d *Dialer) newConn(address string, header http.Header, tlsConfig *tls.Config) (*Conn, error) {
 	config, err := websocket.NewConfig(address, "http://localhost")
 	if err != nil {
 		return nil, err
 	}
-	config.Header = header
+	for k, v := range header {
+		config.Header.Set(k, v[0])
+	}
+	config.Header.Set("Sec-WebSocket-Extensions", "permessage-deflate; client_max_window_bits")
+	config.TlsConfig = tlsConfig
+
 	requestURI, err := url.ParseRequestURI(address)
 	if err != nil {
 		return nil, err
 	}
-	conn, err := net.Dial("tcp", requestURI.Host)
-	if err != nil {
-		return nil, err
+	// 自动补全端口
+	dialAddr := requestURI.Host
+	if requestURI.Port() == "" {
+		switch requestURI.Scheme {
+		case "wss":
+			dialAddr = net.JoinHostPort(requestURI.Hostname(), "443")
+		case "ws":
+			dialAddr = net.JoinHostPort(requestURI.Hostname(), "80")
+		}
 	}
-	conn, err = proxy.FromEnvironmentUsing(&proxyDialer{conn: conn}).Dial("tcp", requestURI.Host)
-	if err != nil {
-		return nil, err
+	var conn net.Conn
+	if d.Conn == nil {
+		// 使用环境变量代理
+		conn, err = proxy.FromEnvironment().Dial("tcp", dialAddr)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// 使用已有的连接
+		conn = d.Conn
 	}
+	switch requestURI.Scheme {
+	case "wss":
+		tlsConn := tls.Client(conn, config.TlsConfig)
+		if err := tlsConn.Handshake(); err != nil {
+			return nil, err
+		}
+		conn = tlsConn
+	}
+
 	wsconn, err := websocket.NewClient(config, conn)
 	if err != nil {
 		return nil, err
 	}
-
-	return &Conn{conn: wsconn}, nil
+	return &Conn{conn: wsconn, status: "alive", MsgType: d.MsgType, Marshal: d.Marshal}, nil
 }
 
-func (c *Conn) Send(message string) error {
-	return websocket.Message.Send(c.conn, message)
+func (c *Conn) Send(message any) (err error) {
+	var msg any
+	switch c.MsgType {
+	case MsgTypeText, "":
+		msg, err = transferText[string](message, c.Marshal)
+	case MsgTypeBinary:
+		msg, err = transferText[[]byte](message, c.Marshal)
+	default:
+		return fmt.Errorf("unsupported message type: %s", c.MsgType)
+	}
+	if err != nil {
+		return err
+	}
+	if err = websocket.Message.Send(c.conn, msg); err != nil {
+		c.status = "dead"
+		return err
+	}
+	c.status = "alive"
+	return nil
+}
+
+func transferText[T string | []byte](message any, marshal func(any) ([]byte, error)) (T, error) {
+	switch v := message.(type) {
+	case string:
+		return T(v), nil
+	case []byte:
+		return T(v), nil
+	default:
+		var t T
+		msg, err := marshal(v)
+		if err != nil {
+			return t, err
+		}
+		return T(msg), nil
+	}
 }
 
 func (c *Conn) SetReadDeadline(t time.Time) error {
@@ -89,5 +174,6 @@ func (c *Conn) IsAlive() bool {
 }
 
 func (c *Conn) Close() error {
+	c.status = "dead"
 	return c.conn.Close()
 }
