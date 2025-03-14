@@ -33,7 +33,7 @@ func (d *Dialer) Dial(ctx context.Context, address string) (*Conn, error) {
 	if d.Marshal == nil {
 		d.Marshal = json.Marshal
 	}
-	return d.newConn(address, d.Header, d.Tls)
+	return d.newConn(ctx, address, d.Header, d.Tls)
 }
 
 type MsgType string
@@ -61,7 +61,7 @@ func (d *proxyDialer) Dial(network, addr string) (net.Conn, error) {
 	return d.conn, nil
 }
 
-func (d *Dialer) newConn(address string, header http.Header, tlsConfig *tls.Config) (*Conn, error) {
+func (d *Dialer) newConn(ctx context.Context, address string, header http.Header, tlsConfig *tls.Config) (*Conn, error) {
 	config, err := websocket.NewConfig(address, "http://localhost")
 	if err != nil {
 		return nil, err
@@ -88,8 +88,12 @@ func (d *Dialer) newConn(address string, header http.Header, tlsConfig *tls.Conf
 	}
 	var conn net.Conn
 	if d.Conn == nil {
-		// 使用环境变量代理
-		conn, err = proxy.FromEnvironment().Dial("tcp", dialAddr)
+		proxyDialer := proxy.FromEnvironment()
+		if proxyCtxDialer, ok := proxyDialer.(proxy.ContextDialer); ok {
+			conn, err = proxyCtxDialer.DialContext(ctx, "tcp", dialAddr)
+		} else {
+			conn, err = proxyDialer.Dial("tcp", dialAddr)
+		}
 		if err != nil {
 			return nil, err
 		}

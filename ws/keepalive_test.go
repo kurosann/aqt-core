@@ -44,11 +44,12 @@ func TestKeepAliver_Basic(t *testing.T) {
 	connCtx, cancel := context.WithTimeout(context.Background(), time.Second*10)
 	defer cancel()
 	// 测试连接建立
-	ctx := ka.KeepAlive(connCtx)
+	ctx, err := ka.KeepAlive(connCtx)
+	assert.NoError(t, err, "连接应该建立成功")
 	assert.True(t, ka.IsAlive(), "连接应该处于活跃状态")
 
 	// 测试发送消息
-	err := ka.Send("test message")
+	err = ka.Send("test message")
 	assert.NoError(t, err, "发送消息应该成功")
 
 	// 测试重连
@@ -85,14 +86,15 @@ func TestKeepAliver_SendError(t *testing.T) {
 
 	connCtx, cancel := context.WithTimeout(context.Background(), time.Second*10)
 	defer cancel()
-	ctx := ka.KeepAlive(connCtx)
+	ctx, err := ka.KeepAlive(connCtx)
+	assert.NoError(t, err, "连接应该建立成功")
 
 	ka.conn.Close() // 模拟网络连接断开,保持连接活跃
 	assert.True(t, ka.IsAlive(), "连接应该处于活跃状态")
 	ka.Close() // 模拟连接断开
 
 	mockHandler.errors = []error{}
-	err := ka.Send("test message")
+	err = ka.Send("test message")
 	assert.Error(t, err, "向断开的连接发送消息应该返回错误")
 	assert.Empty(t, mockHandler.errors, "错误应该为空")
 

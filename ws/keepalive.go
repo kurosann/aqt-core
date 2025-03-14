@@ -3,10 +3,17 @@ package ws
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
+	"github.com/kurosann/aqt-core/logger"
 	"github.com/kurosann/aqt-core/safe"
+	"go.uber.org/zap"
+)
+
+var (
+	ErrDialContext = errors.New("dial error")
 )
 
 type MsgHandler interface {
@@ -31,7 +38,8 @@ type KeepAliver struct {
 	once   sync.Once
 }
 
-func (k *KeepAliver) KeepAlive(connCtx context.Context) context.Context {
+func (k *KeepAliver) KeepAlive(connCtx context.Context) (context.Context, error) {
+	var dialErr error
 	k.once.Do(func() {
 		if k.MsgHandler == nil {
 			k.MsgHandler = &defaultMsgHandler{}
@@ -53,11 +61,10 @@ func (k *KeepAliver) KeepAlive(connCtx context.Context) context.Context {
 				if err := func() error {
 					c, err := k.Dialer.Dial(connCtx, k.Address)
 					if err != nil {
-						return k.IifCtxErr(k.ctx, err)
+						return k.IifCtxErr(k.ctx, fmt.Errorf("%w: %w", ErrDialContext, err))
 					}
 					defer c.Close()
 					k.wg.Done()
-					defer k.wg.Add(1)
 
 					k.rw.Lock()
 					k.conn = c
@@ -83,21 +90,31 @@ func (k *KeepAliver) KeepAlive(connCtx context.Context) context.Context {
 				}(); err != nil {
 					// 异常情况重连
 					k.MsgHandler.OnError(err)
+					logger.Debug("keepalive error", zap.Error(err))
+					if errors.Is(err, ErrDialContext) {
+						k.wg.Done()
+						dialErr = err
+						return
+					}
 					time.Sleep(k.Delay)
 					continue
 				}
-				break
+				return
 			}
 		})
 	})
 	k.wg.Wait()
-	return k.ctx
+	logger.Debug("keepalive done", zap.Error(dialErr))
+	return k.ctx, dialErr
 }
 func (k *KeepAliver) IifCtxErr(ctx context.Context, err error) error {
 	select {
 	case <-ctx.Done():
 		return nil
 	default:
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
 		return err
 	}
 }
